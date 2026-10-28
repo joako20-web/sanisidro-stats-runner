@@ -1,0 +1,99 @@
+# Web estática pública (GitHub Pages) con las estadísticas del San Isidro RC.
+# El código y los datos viven en el repo PRIVADO; aquí solo se genera el sitio y se publica.
+# Se lanza: a mano, al terminar con éxito el workflow «actualizar» (martes) y cada lunes a las 03:00 UTC.
+name: web
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["actualizar"]
+    types: [completed]
+  schedule:
+    - cron: "0 3 * * 1"   # lunes 03:00 UTC
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  construir:
+    # Si lo dispara «actualizar», solo continúa cuando ese workflow acabó bien
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: joako20-web/sanisidro-stats-bot
+          ssh-key: ${{ secrets.BOT_DEPLOY_KEY }}
+          ref: main
+          path: app
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: app/uv.lock
+
+      - run: uv sync --frozen
+        working-directory: app
+
+      - name: Generar la web
+        working-directory: app
+        env:
+          SIBOT_SIN_ENV: "1"
+        run: uv run python -m sibot web --salida _site
+
+      - name: Añadir parte estática (index, css, js, assets) si el exportador no la copió
+        working-directory: app
+        run: |
+          mkdir -p _site
+          if [ -d web ]; then cp -a -n web/. _site/; fi
+          test -f _site/index.html || { echo "::error::No se generó _site/index.html"; exit 1; }
+
+      - name: No indexar, robots.txt y 404.html
+        working-directory: app/_site
+        run: |
+          printf 'User-agent: *\nDisallow: /\n' > robots.txt
+          touch .nojekyll
+          # <meta name="robots" content="noindex"> en todas las páginas que no lo tengan ya
+          find . -name '*.html' -print0 | while IFS= read -r -d '' f; do
+            if ! grep -qi 'name="robots"' "$f"; then
+              sed -i '0,/<head[^>]*>/s//&\n<meta name="robots" content="noindex, nofollow">/' "$f"
+            fi
+          done
+          cat > 404.html <<'HTML'
+          <!doctype html>
+          <html lang="es">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta name="robots" content="noindex, nofollow">
+          <title>Página no encontrada</title>
+          <meta http-equiv="refresh" content="0; url=/sanisidro-stats-runner/">
+          </head>
+          <body>
+          <p>Página no encontrada. <a href="/sanisidro-stats-runner/">Volver al inicio</a></p>
+          <script>location.replace("/sanisidro-stats-runner/");</script>
+          </body>
+          </html>
+          HTML
+          sed -i 's/^          //' 404.html
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: app/_site
+
+  desplegar:
+    needs: construir
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.despliegue.outputs.page_url }}
+    steps:
+      - id: despliegue
+        uses: actions/deploy-pages@v4
