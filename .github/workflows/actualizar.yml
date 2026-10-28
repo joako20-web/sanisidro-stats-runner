@@ -1,0 +1,67 @@
+# Actualización semanal de los datos (martes): vuelve a descargar los partidos de la temporada en curso y
+# hace commit en el repo privado. El bot detecta el cambio, recarga los datos y avisa al administrador.
+name: actualizar
+
+on:
+  schedule:
+    - cron: "0 5 * * 2"   # martes 05:00 UTC (06:00 o 07:00 en Madrid)
+  workflow_dispatch:
+
+concurrency:
+  group: actualizar
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # solo para el latido de este repo (evita que GitHub desactive el cron por inactividad)
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: runner
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joako20-web/sanisidro-stats-bot
+          ssh-key: ${{ secrets.BOT_DEPLOY_KEY }}
+          ref: main
+          path: app
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: app/uv.lock
+
+      - run: uv sync --frozen
+        working-directory: app
+
+      - name: Descargar datos nuevos
+        working-directory: app
+        env:
+          SIBOT_SIN_ENV: "1"
+        run: uv run python -m sibot actualizar
+
+      - name: Guardar datos en el repo privado
+        working-directory: app
+        run: |
+          git config user.name "sanisidro-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add datos
+          git diff --cached --quiet && echo "Sin cambios" && exit 0
+          git commit -m "Datos actualizados ($(date -u +%F))" -q
+          for i in 1 2 3 4; do git pull --rebase -X theirs --autostash origin main && git push origin HEAD:main && exit 0; git rebase --abort 2>/dev/null; sleep 5; done
+          exit 1
+
+      - name: Latido (mantiene activo este repo)
+        working-directory: runner
+        run: |
+          git config user.name "sanisidro-bot"
+          git config user.email "bot@users.noreply.github.com"
+          date -u +%F > latido.txt
+          git add latido.txt
+          git diff --cached --quiet && exit 0
+          git commit -m "Latido" -q
+          git push

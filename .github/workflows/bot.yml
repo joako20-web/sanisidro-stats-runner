@@ -1,0 +1,89 @@
+# Bot de Telegram de estadísticas del San Isidro. Este repo (público) solo contiene los workflows:
+# el código, los datos y el estado viven en un repo PRIVADO que se descarga con una llave de despliegue.
+# Cada ejecución escucha Telegram 55 minutos y al acabar lanza la siguiente (relevo); el cron es el respaldo.
+name: bot
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write  # para lanzar el relevo
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: ¿Están los secretos?
+        id: ok
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          KEY: ${{ secrets.BOT_DEPLOY_KEY }}
+        run: |
+          if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$KEY" ]; then echo "ok=true" >> "$GITHUB_OUTPUT";
+          else echo "::notice::Faltan secretos (TELEGRAM_TOKEN / BOT_DEPLOY_KEY): no hago nada"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.ok.outputs.ok == 'true'
+        with:
+          repository: joako20-web/sanisidro-stats-bot
+          ssh-key: ${{ secrets.BOT_DEPLOY_KEY }}
+          ref: main
+          path: app
+
+      - uses: astral-sh/setup-uv@v6
+        if: steps.ok.outputs.ok == 'true'
+        with:
+          enable-cache: true
+          cache-dependency-glob: app/uv.lock
+
+      - run: uv sync --frozen
+        if: steps.ok.outputs.ok == 'true'
+        working-directory: app
+
+      - name: Navegador (usa el Chrome del runner; si no hay, instala Chromium)
+        if: steps.ok.outputs.ok == 'true'
+        working-directory: app
+        run: |
+          if command -v google-chrome >/dev/null; then echo "PLAYWRIGHT_CHANNEL=chrome" >> "$GITHUB_ENV";
+          else uv run playwright install --with-deps chromium; fi
+
+      - name: Escuchar Telegram
+        id: escuchar
+        if: steps.ok.outputs.ok == 'true'
+        working-directory: app
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          SIBOT_GIT_SYNC: "1"   # sube el estado (usuarios aprobados…) al repo privado cada pocos minutos
+          SIBOT_SIN_ENV: "1"
+        run: |
+          git config user.name "sanisidro-bot"
+          git config user.email "bot@users.noreply.github.com"
+          uv run python -m sibot bot --minutos 55
+
+      - name: Guardar estado (también si se cancela)
+        if: always() && steps.ok.outputs.ok == 'true'
+        working-directory: app
+        run: |
+          git config user.name "sanisidro-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add datos/estado
+          git diff --cached --quiet && exit 0
+          git commit -m "Estado del bot" -q
+          for i in 1 2 3 4; do git pull --rebase -X theirs --autostash origin main && git push origin HEAD:main && exit 0; git rebase --abort 2>/dev/null; sleep 5; done
+          exit 1
+
+      - name: Relevo (lanza la siguiente ejecución; el cron queda de respaldo)
+        # Si el bot falla no se relanza en bucle: el cron lo reintenta
+        if: always() && steps.ok.outputs.ok == 'true' && steps.escuchar.outcome != 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml --ref main --repo "${{ github.repository }}"
