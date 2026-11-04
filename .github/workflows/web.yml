@@ -1,6 +1,7 @@
 # Web estática pública (GitHub Pages) con las estadísticas del San Isidro RC.
 # El código y los datos viven en el repo PRIVADO; aquí solo se genera el sitio y se publica.
-# Se lanza: a mano, al terminar con éxito el workflow «actualizar» (martes) y cada lunes a las 03:00 UTC.
+# Se lanza: a mano, al terminar con éxito el workflow «actualizar» (martes) y dos veces al día (06:00 y 18:00 UTC), para recoger a tiempo la
+# programación del fin de semana (PDF de la federación) y sus aplazamientos.
 name: web
 
 on:
@@ -9,7 +10,7 @@ on:
     workflows: ["actualizar"]
     types: [completed]
   schedule:
-    - cron: "0 3 * * 1"   # lunes 03:00 UTC
+    - cron: "0 6,18 * * *"   # todos los días 06:00 y 18:00 UTC
 
 permissions:
   contents: read
@@ -41,6 +42,14 @@ jobs:
 
       - run: uv sync --frozen
         working-directory: app
+
+      - name: Programación del fin de semana (PDF de la federación)
+        # Si la federación no responde o cambia el PDF, la web se genera igual con el calendario nominal de MatchReady
+        continue-on-error: true
+        working-directory: app
+        env:
+          SIBOT_SIN_ENV: "1"
+        run: uv run python -m sibot programacion
 
       - name: Generar la web
         working-directory: app
